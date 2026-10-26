@@ -1,0 +1,24 @@
+#version 330 core
+layout (location = 0) in vec3 Position;
+layout (location = 1) in vec3 Normal;
+layout (location = 2) in vec2 TexCoords;
+layout (location = 3) in mat4 model;
+
+out vec2 outTexCoord;
+out vec3 outNormal;
+out vec3 outFragPos;
+// out vec3 outFragViewPos;
+
+uniform mat4 rotate;
+uniform mat4 view;
+uniform mat4 projection;
+
+void main() {
+  gl_Position = projection * view * rotate * model * vec4(Position, 1.0f);
+  gl_PointSize = gl_Position.z * 5.0f;
+  outTexCoord = TexCoords;
+  mat3 normalMatrix = mat3(transpose(inverse(rotate * model)));
+  outNormal = normalMatrix * Normal;
+  outFragPos = vec3( rotate * model * vec4(Position, 1.0f));
+  // outFragViewPos = vec3(view * vec4(vFragPos, 1.0));
+}

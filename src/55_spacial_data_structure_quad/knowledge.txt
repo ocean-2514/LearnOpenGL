@@ -1,0 +1,452 @@
+空间数据结构学习与实现路线
+==========================
+
+目标
+----
+从 2D 开始实现空间查询与加速结构，为碰撞检测、可见性查询和光线追踪打基础。
+
+推荐顺序：
+
+    2D 几何基础
+        -> 暴力查询（正确性基准）
+        -> 均匀网格
+        -> 四叉树
+        -> 点 KD-Tree
+        -> 2D BVH
+        -> 2D 射线查询
+        -> 迁移到 3D
+
+重要区别：
+
+1. 空间划分：划分空间区域，例如 Uniform Grid、Quadtree、Octree、空间 KD-Tree。
+2. 物体划分：划分物体集合，例如 BVH。
+3. 点 KD-Tree：主要解决最近邻和范围查询，不等同于光追中的空间 KD-Tree。
+4. 光线追踪优先学习 BVH；它通常比空间 KD-Tree 更容易构建和更新。
+
+
+阶段 0：整理独立的 2D 实验环境
+--------------------------------
+
+目标：让空间数据结构与 OpenGL 绘制解耦，可以单独测试。
+
+建议文件：
+
+    include/spatial/Geometry2D.h
+    include/spatial/BruteForce2D.h
+    include/spatial/UniformGrid2D.h
+    include/spatial/Quadtree.h
+    include/spatial/KDTree2D.h
+    include/spatial/BVH2D.h
+    src/54_spacial_data_structure_uniform/main.cpp
+
+基础数据：
+
+    using ObjectId = std::uint32_t;
+
+    struct Object2D {
+        ObjectId id;
+        AABB2 bounds;
+        glm::vec2 velocity;
+    };
+
+树和网格中优先保存 ObjectId，不保存容易失效的裸指针。物体数据由场景统一管理。
+
+可视化目标：
+
+- 随机生成圆或矩形。
+- 鼠标拖出一个查询矩形。
+- 白色绘制普通物体，红色绘制查询结果。
+- 绘制网格线、树节点边界和射线。
+- 按键切换暴力、Grid、Quadtree、KD-Tree 和 BVH。
+- 显示访问节点数、AABB 测试次数和查询耗时。
+
+验收标准：程序能生成和移动物体，数据结构代码不依赖 OpenGL。
+
+
+阶段 1：2D 几何基础
+-------------------
+
+目标：完成所有空间结构共同依赖的几何操作。
+
+建议类型：
+
+    struct AABB2 {
+        glm::vec2 min;
+        glm::vec2 max;
+
+        glm::vec2 center() const;
+        glm::vec2 size() const;
+        float area() const;
+        bool contains(glm::vec2 point) const;
+        bool contains(const AABB2& other) const;
+        bool intersects(const AABB2& other) const;
+        static AABB2 merge(const AABB2& a, const AABB2& b);
+    };
+
+    struct Ray2 {
+        glm::vec2 origin;
+        glm::vec2 direction;
+    };
+
+实现路径：
+
+1. 点与 AABB 包含测试。
+2. AABB 与 AABB 相交测试。
+3. 圆与 AABB 相交测试。
+4. AABB 合并、中心、尺寸和面积。
+5. 使用 Slab 方法实现 Ray2 与 AABB 求交，返回 tNear 和 tFar。
+6. 明确边界语义：相切是否算相交，并让所有函数保持一致。
+
+参考：include/tool/geometry_query.h 中已有 3D 射线与 AABB 的 Slab 实现。
+
+验收测试：
+
+- 完全分离、相交、包含、边界相切。
+- 负坐标与零面积 AABB。
+- 射线平行于某个坐标轴。
+- 射线起点在 AABB 内部。
+- 射线方向分量为 0 时不产生除零错误。
+
+
+阶段 2：暴力查询基准
+--------------------
+
+目标：得到最简单且可信的结果，作为其他结构的正确性参照。
+
+建议接口：
+
+    class BruteForce2D {
+    public:
+        void insert(ObjectId id);
+        void remove(ObjectId id);
+        std::vector<ObjectId> queryRange(const AABB2& range) const;
+        std::vector<ObjectId> queryRay(const Ray2& ray) const;
+    };
+
+实现路径：
+
+1. 遍历全部物体。
+2. 对每个物体执行 AABB 相交测试。
+3. 收集命中的 ObjectId。
+4. 将结果排序并去重，形成稳定输出。
+5. 记录执行了多少次物体测试。
+
+验收标准：手工构造的小场景查询结果正确；以后所有加速结构都与它逐项比较。
+
+
+阶段 3：均匀网格 Uniform Grid
+------------------------------
+
+适用场景：物体大小相近、分布较均匀、动态更新频繁。
+
+第一版建议使用固定尺寸的二维网格，第二版改为哈希网格。
+
+建议接口：
+
+    class UniformGrid2D {
+    public:
+        void insert(ObjectId id, const AABB2& bounds);
+        void remove(ObjectId id, const AABB2& bounds);
+        void update(ObjectId id,
+                    const AABB2& oldBounds,
+                    const AABB2& newBounds);
+        std::vector<ObjectId> queryRange(const AABB2& range) const;
+    };
+
+实现路径：
+
+1. 设定 cellSize 和世界范围。
+2. 将世界坐标映射为整数格子坐标：floor(position / cellSize)。
+3. 计算一个 AABB 覆盖的最小与最大格子坐标。
+4. 插入时把 ObjectId 放入它覆盖的所有格子。
+5. 范围查询只遍历查询框覆盖的格子。
+6. 因为物体可能存在多个格子，查询结果必须去重。
+7. 实现 remove，再用 remove + insert 实现 update。
+8. 用 unordered_map<Cell, vector<ObjectId>> 实现无限稀疏网格。
+9. 实现 DDA 网格遍历，为射线查询做准备。
+
+关键注意：
+
+- 坐标可能为负数，必须使用 floor，不能直接强制转换为 int。
+- 统一处理恰好落在格子最大边界上的 AABB。
+- cellSize 太小会让一个物体占许多格子；太大则会增加无效物体测试。
+
+验收标准：
+
+- 随机生成至少 1000 组范围查询，与暴力结果完全相同。
+- 移动物体后结果仍然正确。
+- 输出不同 cellSize 下的查询次数和耗时。
+
+
+阶段 4：四叉树 Quadtree
+------------------------
+
+适用场景：2D 物体分布不均匀、需要范围查询或碰撞粗筛。
+
+建议节点：
+
+    struct Node {
+        AABB2 bounds;
+        std::vector<ObjectId> objects;
+        std::array<std::unique_ptr<Node>, 4> children;
+        int depth = 0;
+
+        bool isLeaf() const;
+    };
+
+建议参数：
+
+    capacity = 4 或 8
+    maxDepth = 8 到 12
+
+插入路径：
+
+1. 如果节点是叶子且未超过 capacity，把物体留在当前节点。
+2. 超过 capacity 且 depth < maxDepth 时，将节点四等分。
+3. 重新检查当前节点的旧物体。
+4. 物体完全属于一个子节点时下放。
+5. 物体跨越分割线时保留在当前节点。
+6. 达到 maxDepth 后停止分裂，避免无限递归。
+
+范围查询路径：
+
+1. 查询框不与节点 bounds 相交：立即返回。
+2. 测试当前节点保存的所有物体。
+3. 递归访问与查询框相交的子节点。
+4. 返回排序、去重后的 ObjectId。
+
+删除与更新路径：
+
+1. 通过 id 查找并删除物体。
+2. 第一版更新可直接 remove + insert。
+3. 子树物体数低于阈值时，可把子节点内容合并回父节点。
+4. 第二版可保存 id 到节点的索引，降低删除成本。
+
+进阶：Loose Quadtree
+
+1. 保持节点划分区域不变。
+2. 将子节点用于容纳物体的 bounds 扩大为 1.5 到 2 倍。
+3. 物体小范围移动时不必立即换节点。
+4. 对比普通四叉树与 Loose Quadtree 的更新次数。
+
+验收标准：
+
+- 跨越中心线的大物体不会丢失或被重复返回。
+- 全部物体位置相同时不会无限分裂。
+- 随机范围查询结果与暴力查询完全一致。
+- 可视化每层节点边界以及查询时访问的节点。
+
+
+阶段 5：2D 点 KD-Tree
+---------------------
+
+适用场景：点集的范围查询、最近邻和 K 最近邻查询。
+
+注意：这一阶段保存点，不保存有面积的 AABB；它主要用于理解切分轴和剪枝。
+
+建议节点：
+
+    struct KDNode {
+        ObjectId pointId;
+        int axis;
+        std::unique_ptr<KDNode> left;
+        std::unique_ptr<KDNode> right;
+    };
+
+构建路径：
+
+1. 当前切分轴 axis = depth % 2。
+2. 使用 std::nth_element 找到当前轴上的中位数。
+3. 中位点成为当前节点。
+4. 左右两部分递归构建子树。
+5. 空区间返回 nullptr。
+
+范围查询路径：
+
+1. 检查当前点是否在查询框中。
+2. 如果查询框跨过切分平面，则两侧都可能需要访问。
+3. 否则只访问可能包含结果的一侧。
+
+最近邻查询路径：
+
+1. 保存当前最近点和距离平方，避免频繁开平方。
+2. 先访问查询点所在的近侧子树。
+3. 用查询点到切分平面的距离平方与当前最佳距离平方比较。
+4. 切分平面仍可能包含更近点时，再访问远侧子树。
+
+K 最近邻扩展：使用大小为 K 的最大堆保存当前候选点。
+
+验收标准：
+
+- 最近邻和 K 近邻与暴力距离排序结果相同。
+- 点落在切分平面上时不会漏查。
+- 对随机点、共线点和全部重合点均能结束构建和查询。
+
+
+阶段 6：2D BVH
+---------------
+
+适用场景：有面积物体、碰撞粗筛和光线追踪。
+
+建议节点：
+
+    struct BVHNode {
+        AABB2 bounds;
+        std::unique_ptr<BVHNode> left;
+        std::unique_ptr<BVHNode> right;
+        std::vector<ObjectId> objects; // 仅叶节点使用
+
+        bool isLeaf() const;
+    };
+
+第一版：中位数构建
+
+1. 计算当前全部物体的总包围盒。
+2. 物体数 <= leafCapacity 时创建叶节点。
+3. 选择总包围盒最长的轴。
+4. 按物体包围盒中心在该轴上的坐标取中位数。
+5. 将物体分为左右集合并递归构建。
+6. 父节点 bounds 是左右子节点 bounds 的合并。
+
+范围与射线查询：
+
+1. 查询对象不与节点 bounds 相交时剪枝。
+2. 叶节点中执行真正的物体测试。
+3. 内部节点递归访问左右子树。
+4. 射线查询时优先遍历 tNear 更小的子节点。
+5. 最近命中距离小于另一个节点的 tNear 时，可以跳过该节点。
+
+第二版：SAH 构建
+
+2D 代价近似：
+
+    Cost = C_traversal
+         + Area(left)  / Area(parent) * Count(left)  * C_intersection
+         + Area(right) / Area(parent) * Count(right) * C_intersection
+
+实现路径：
+
+1. 对每个候选轴生成若干分桶（例如 8 或 16 个 bin）。
+2. 从左向右计算累计数量和包围盒。
+3. 从右向左计算累计数量和包围盒。
+4. 计算每个桶边界的 SAH 代价。
+5. 选择代价最小的轴和切分位置。
+6. 如果切分代价不优于创建叶节点，则停止切分。
+
+动态场景扩展：
+
+- Refit：叶节点物体移动后，自底向上重新合并包围盒。
+- Rebuild：树退化严重时重新构建。
+- 比较每帧完整重建、Refit、Quadtree 更新和 Uniform Grid 更新。
+
+验收标准：
+
+- 节点 bounds 始终包含全部后代物体。
+- 范围查询和射线最近命中与暴力结果相同。
+- 对比中位数划分与 SAH 的节点访问数和构建时间。
+
+
+阶段 7：碰撞检测 Broad Phase
+-----------------------------
+
+目标：利用空间结构生成“可能发生碰撞”的物体对，再进行精确检测。
+
+实现路径：
+
+1. 为每个动态物体查询与其 AABB 重叠的候选物体。
+2. 排除自身。
+3. 将物体对规范为 (minId, maxId)。
+4. 使用哈希集合去除重复物体对。
+5. 对候选对执行圆-圆、AABB-AABB 等窄阶段测试。
+6. 分别统计候选对数量和真正碰撞数量。
+
+验收标准：不会漏掉暴力检测发现的任何碰撞；比较不同结构产生的冗余候选对数量。
+
+
+阶段 8：2D 射线遍历实验
+-----------------------
+
+目标：理解光线追踪加速结构真正减少的工作量。
+
+实现路径：
+
+1. 实现 Ray2 与圆、线段、AABB 求交。
+2. 暴力遍历全部物体并返回最近命中。
+3. 使用 DDA 遍历 Uniform Grid。
+4. 使用近到远顺序遍历 Quadtree。
+5. 使用近到远顺序遍历 BVH。
+6. 记录每条射线访问的节点数和真实物体求交次数。
+7. 可视化射线、访问节点以及最近命中点。
+
+验收标准：所有结构返回与暴力版本相同的最近物体和命中距离。
+
+
+阶段 9：迁移到 3D
+------------------
+
+对应关系：
+
+    glm::vec2       -> glm::vec3
+    AABB2           -> AABB3
+    矩形/圆         -> AABB/球/三角形
+    Quadtree        -> Octree
+    2 个 KD 切分轴  -> 3 个 KD 切分轴
+    2D BVH          -> 3D BVH
+    矩形面积        -> AABB 表面积（用于 3D SAH）
+
+3D 推荐顺序：
+
+1. AABB3 与 Ray3。
+2. Ray 与球、三角形求交。
+3. 三角形包围盒。
+4. 为三角形集合构建 BVH。
+5. 遍历 BVH，查找射线最近命中。
+6. 将 BVH 接入 CPU 光线追踪器。
+7. 最后再研究 Octree 和空间 KD-Tree，比较它们与 BVH 的差异。
+
+
+统一测试与性能记录
+------------------
+
+每个数据结构都使用同一套查询输入，并与暴力结果比较：
+
+    expected = bruteForce.queryRange(range);
+    actual   = structure.queryRange(range);
+    sortAndUnique(expected);
+    sortAndUnique(actual);
+    assert(expected == actual);
+
+必须测试的场景：
+
+- 空场景和单个物体。
+- 所有物体位置相同。
+- 物体恰好在分割线上。
+- 大物体跨越多个区域。
+- 负坐标和零面积 AABB。
+- 查询范围完全位于世界外。
+- 查询范围覆盖整个世界。
+- 大量密集物体和极不均匀分布。
+- 动态物体跨越格子或节点边界。
+
+统一记录：
+
+- 构建耗时。
+- 更新耗时。
+- 查询耗时。
+- 访问节点或格子数量。
+- AABB 测试次数。
+- 真实物体求交次数。
+- 树的最大深度。
+- 叶节点物体数量分布。
+- 内存占用的粗略估计。
+
+
+最终完成标准
+------------
+
+1. 任意结构的查询结果都能由暴力版本验证。
+2. 能通过可视化解释一次查询访问了哪些区域、剪掉了哪些区域。
+3. 能说明数据分布、物体尺寸和动态更新对不同结构的影响。
+4. 能独立实现 3D 三角形 BVH 和最近射线命中查询。
+5. 能根据场景选择结构，而不是认为存在始终最快的数据结构。
+
